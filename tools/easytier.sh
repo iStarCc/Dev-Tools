@@ -404,12 +404,13 @@ et_enable_ip_forward() {
     echo ""
     if is_macos; then
         _run_root sysctl -w net.inet.ip.forwarding=1 > /dev/null
+        _run_root sysctl -w net.inet6.ip6.forwarding=1 > /dev/null
         local sysctl_conf="/etc/sysctl.conf"
-        if ! grep -q "net.inet.ip.forwarding=1" "$sysctl_conf" 2>/dev/null; then
+        grep -q "net.inet.ip.forwarding=1" "$sysctl_conf" 2>/dev/null || \
             echo "net.inet.ip.forwarding=1" | _run_root tee -a "$sysctl_conf" > /dev/null
-        fi
+        grep -q "net.inet6.ip6.forwarding=1" "$sysctl_conf" 2>/dev/null || \
+            echo "net.inet6.ip6.forwarding=1" | _run_root tee -a "$sysctl_conf" > /dev/null
 
-        # 创建开机自启 plist
         local fw_plist="/Library/LaunchDaemons/net.inet.ip.forwarding.plist"
         _run_root tee "$fw_plist" > /dev/null << 'FWEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -419,21 +420,25 @@ et_enable_ip_forward() {
     <key>Label</key><string>net.inet.ip.forwarding</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/sbin/sysctl</string>
-        <string>-w</string>
-        <string>net.inet.ip.forwarding=1</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>sysctl -w net.inet.ip.forwarding=1 net.inet6.ip6.forwarding=1</string>
     </array>
     <key>RunAtLoad</key><true/>
 </dict>
 </plist>
 FWEOF
         _run_root launchctl load -w "$fw_plist" 2>/dev/null || true
-        msg_success "macOS IP 转发已启用（已设置开机自启）"
+        msg_success "macOS IPv4 + IPv6 转发已启用（已设置开机自启）"
     else
         _run_root sysctl -w net.ipv4.ip_forward=1 > /dev/null
-        echo "net.ipv4.ip_forward=1" | _run_root tee /etc/sysctl.d/99-easytier.conf > /dev/null
+        _run_root sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
+        cat << EOF | _run_root tee /etc/sysctl.d/99-easytier.conf > /dev/null
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
         _run_root sysctl --system > /dev/null 2>&1
-        msg_success "Linux IP 转发已启用（已持久化）"
+        msg_success "Linux IPv4 + IPv6 转发已启用（已持久化）"
     fi
     press_any_key
 }
@@ -464,42 +469,74 @@ et_iptables_setup() {
     default_iface=$(_detect_default_iface)
 
     echo ""
-    msg_info "配置 iptables 转发规则（使对端可访问本机局域网）"
+    msg_info "配置转发规则（使对端可访问本机局域网）"
     echo ""
 
-    local vpn_subnet lan_subnet iface
+    # ── IPv4 ──
+    local vpn4 lan4 iface
+    vpn4=$(prompt_input "VPN IPv4 网段" "10.10.10.0/24")
+    [[ -z "$vpn4" ]] && return
 
-    vpn_subnet=$(prompt_input "EasyTier VPN 网段" "10.10.10.0/24")
-    [[ -z "$vpn_subnet" ]] && return
-
-    lan_subnet=$(prompt_input "本机局域网网段" "")
-    [[ -z "$lan_subnet" ]] && return
+    lan4=$(prompt_input "局域网 IPv4 网段" "")
+    [[ -z "$lan4" ]] && return
 
     iface=$(prompt_input "出口网卡" "$default_iface")
     [[ -z "$iface" ]] && return
 
+    # ── IPv6（可选）──
+    local vpn6="" lan6=""
     echo ""
-    msg_info "将添加以下规则:"
-    printf "  ${C_CYAN}iptables -t nat -A POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$vpn_subnet" "$lan_subnet"
-    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -j ACCEPT${C_RESET}\n" "$vpn_subnet" "$lan_subnet"
-    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -m state --state RELATED,ESTABLISHED -j ACCEPT${C_RESET}\n" "$lan_subnet" "$vpn_subnet"
+    show_menu "是否配置 IPv6 规则?" true "是" "否"
+    if [[ $MENU_RESULT -eq 0 ]]; then
+        vpn6=$(prompt_input "VPN IPv6 网段" "fd00::/8")
+        lan6=$(prompt_input "局域网 IPv6 网段 (如 240e:xx::/64)" "")
+    fi
+
+    # ── 预览 ──
+    echo ""
+    msg_info "IPv4 规则:"
+    printf "  ${C_CYAN}iptables -t nat -A POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$vpn4" "$lan4"
+    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -j ACCEPT${C_RESET}\n" "$vpn4" "$lan4"
+    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -m state --state RELATED,ESTABLISHED -j ACCEPT${C_RESET}\n" "$lan4" "$vpn4"
+
+    if [[ -n "$vpn6" && -n "$lan6" ]]; then
+        echo ""
+        msg_info "IPv6 规则:"
+        printf "  ${C_CYAN}ip6tables -t nat -A POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$vpn6" "$lan6"
+        printf "  ${C_CYAN}ip6tables -A FORWARD -s %s -d %s -j ACCEPT${C_RESET}\n" "$vpn6" "$lan6"
+        printf "  ${C_CYAN}ip6tables -A FORWARD -s %s -d %s -m state --state RELATED,ESTABLISHED -j ACCEPT${C_RESET}\n" "$lan6" "$vpn6"
+        printf "  ${C_CYAN}ip6tables -A FORWARD -p icmpv6 -j ACCEPT${C_RESET}\n"
+    fi
     echo ""
 
     show_menu "确认应用?" true "应用规则" "应用并持久化" "取消"
     [[ $MENU_RESULT -eq 255 || $MENU_RESULT -eq 2 ]] && return
+    local persist=$MENU_RESULT
 
-    _run_root iptables -t nat -A POSTROUTING -s "$vpn_subnet" -d "$lan_subnet" -j MASQUERADE
-    _run_root iptables -A FORWARD -s "$vpn_subnet" -d "$lan_subnet" -j ACCEPT
-    _run_root iptables -A FORWARD -s "$lan_subnet" -d "$vpn_subnet" -m state --state RELATED,ESTABLISHED -j ACCEPT
-    msg_success "iptables 规则已应用"
+    # ── 应用 IPv4 ──
+    _run_root iptables -t nat -A POSTROUTING -s "$vpn4" -d "$lan4" -j MASQUERADE
+    _run_root iptables -A FORWARD -s "$vpn4" -d "$lan4" -j ACCEPT
+    _run_root iptables -A FORWARD -s "$lan4" -d "$vpn4" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    msg_success "IPv4 规则已应用"
 
-    if [[ $MENU_RESULT -eq 1 ]]; then
+    # ── 应用 IPv6 ──
+    if [[ -n "$vpn6" && -n "$lan6" ]]; then
+        _run_root ip6tables -t nat -A POSTROUTING -s "$vpn6" -d "$lan6" -j MASQUERADE
+        _run_root ip6tables -A FORWARD -s "$vpn6" -d "$lan6" -j ACCEPT
+        _run_root ip6tables -A FORWARD -s "$lan6" -d "$vpn6" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        _run_root ip6tables -A FORWARD -p icmpv6 -j ACCEPT
+        _run_root ip6tables -A INPUT -p icmpv6 -j ACCEPT
+        msg_success "IPv6 规则已应用"
+    fi
+
+    # ── 持久化 ──
+    if [[ $persist -eq 1 ]]; then
         if command -v netfilter-persistent &>/dev/null; then
             _run_root netfilter-persistent save 2>/dev/null
-            msg_success "规则已持久化 (netfilter-persistent)"
+            msg_success "IPv4 + IPv6 规则已持久化"
         elif command -v iptables-save &>/dev/null; then
-            _run_root sh -c 'iptables-save > /etc/iptables/rules.v4' 2>/dev/null || \
-            _run_root sh -c 'iptables-save > /etc/iptables.rules' 2>/dev/null
+            _run_root sh -c 'iptables-save > /etc/iptables/rules.v4' 2>/dev/null || true
+            _run_root sh -c 'ip6tables-save > /etc/iptables/rules.v6' 2>/dev/null || true
             msg_success "规则已保存"
         else
             msg_warn "未找到持久化工具，建议安装 iptables-persistent"
@@ -514,11 +551,17 @@ et_iptables_show() {
         msg_info "macOS pfctl 规则"
         _run_root pfctl -sr 2>/dev/null || msg_warn "无规则或无权限"
     else
-        msg_info "iptables FILTER 规则"
-        _run_root iptables -L -n -v 2>/dev/null || msg_warn "无权限"
+        msg_info "IPv4 FORWARD 规则"
+        _run_root iptables -L FORWARD -n -v 2>/dev/null || msg_warn "无权限"
         echo ""
-        msg_info "iptables NAT 规则"
-        _run_root iptables -t nat -L -n -v 2>/dev/null || msg_warn "无权限"
+        msg_info "IPv4 NAT 规则"
+        _run_root iptables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无权限"
+        echo ""
+        msg_info "IPv6 FORWARD 规则"
+        _run_root ip6tables -L FORWARD -n -v 2>/dev/null || msg_warn "无 ip6tables"
+        echo ""
+        msg_info "IPv6 NAT 规则"
+        _run_root ip6tables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无 ip6tables NAT 支持"
     fi
     press_any_key
 }
@@ -531,16 +574,25 @@ et_iptables_clear() {
     fi
 
     echo ""
-    printf "  ${C_RED}⚠ 将清除所有 iptables FORWARD 和 NAT 规则！${C_RESET}\n"
+    show_menu "清除规则" true "仅 IPv4" "仅 IPv6" "全部清除 (IPv4 + IPv6)"
+    [[ $MENU_RESULT -eq 255 ]] && return
+
+    printf "\n  ${C_RED}⚠ 将清除选中的 FORWARD 和 NAT 规则！${C_RESET}\n"
     printf "  ${C_YELLOW}输入 yes 确认: ${C_RESET}"
     local confirm
     read -r confirm
-    if [[ "$confirm" == "yes" ]]; then
+    [[ "$confirm" != "yes" ]] && { msg_warn "已取消"; press_any_key; return; }
+
+    if [[ $MENU_RESULT -eq 0 || $MENU_RESULT -eq 2 ]]; then
         _run_root iptables -F FORWARD 2>/dev/null || true
         _run_root iptables -t nat -F POSTROUTING 2>/dev/null || true
-        msg_success "已清除 FORWARD 和 NAT 规则"
-    else
-        msg_warn "已取消"
+        msg_success "IPv4 规则已清除"
+    fi
+    if [[ $MENU_RESULT -eq 1 || $MENU_RESULT -eq 2 ]]; then
+        _run_root ip6tables -F FORWARD 2>/dev/null || true
+        _run_root ip6tables -t nat -F POSTROUTING 2>/dev/null || true
+        _run_root ip6tables -F INPUT 2>/dev/null || true
+        msg_success "IPv6 规则已清除"
     fi
     press_any_key
 }
