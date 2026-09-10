@@ -94,7 +94,7 @@ git_reset_commit() {
 
     echo ""
     msg_info "最近提交"
-    git log --oneline --color=always -10 2>/dev/null
+    git --no-pager log --oneline --color=always -10 2>/dev/null
     echo ""
 
     show_menu "重置模式" true \
@@ -178,14 +178,14 @@ git_stash() {
             if [[ "$count" -eq 0 ]]; then
                 printf "  ${C_DIM}(空)${C_RESET}\n"
             else
-                git stash list --color=always 2>/dev/null
+                git --no-pager stash list --color=always 2>/dev/null
             fi
             ;;
         5)
             if [[ "$count" -eq 0 ]]; then
                 msg_warn "暂存列表为空"
             else
-                git stash list 2>/dev/null
+                git --no-pager stash list 2>/dev/null
                 echo ""
                 local idx
                 idx=$(prompt_input "要删除的序号 (如 0)" "0")
@@ -220,9 +220,9 @@ git_log_view() {
     tput cnorm >&2 2>/dev/null || true
     echo ""
     case $MENU_RESULT in
-        0) git log --oneline --color=always -20 ;;
-        1) git log --oneline --graph --all --color=always -30 ;;
-        2) git log --color=always --format="%C(yellow)%h%C(reset) %C(blue)%ad%C(reset) %C(green)%an%C(reset)%n  %s" --date=short -10 ;;
+        0) git --no-pager log --oneline --color=always -20 ;;
+        1) git --no-pager log --oneline --graph --all --color=always -30 ;;
+        2) git --no-pager log --color=always --format="%C(yellow)%h%C(reset) %C(blue)%ad%C(reset) %C(green)%an%C(reset)%n  %s" --date=short -10 ;;
         3)
             local file
             file=$(prompt_input "文件路径" "")
@@ -235,7 +235,7 @@ git_log_view() {
                 press_any_key
                 return
             fi
-            git log --oneline --color=always -- "$file"
+            git --no-pager log --oneline --color=always -- "$file"
             ;;
     esac
     press_any_key
@@ -253,10 +253,10 @@ git_branch_list() {
 
     echo ""
     msg_info "本地分支"
-    git branch -v --color=always 2>/dev/null
+    git --no-pager branch -v --color=always 2>/dev/null
     echo ""
     msg_info "远程分支"
-    git branch -rv --color=always 2>/dev/null || printf "  ${C_DIM}(无远程分支)${C_RESET}\n"
+    git --no-pager branch -rv --color=always 2>/dev/null || printf "  ${C_DIM}(无远程分支)${C_RESET}\n"
     press_any_key
 }
 
