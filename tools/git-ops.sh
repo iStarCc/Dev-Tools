@@ -211,34 +211,178 @@ git_log_view() {
     require_git_repo || return
 
     show_menu "查看历史" true \
-        "简洁模式 (最近 20 条)" \
-        "图形模式 (最近 30 条)" \
-        "详细模式 (最近 10 条)" \
+        "交互浏览 (选择提交可操作)" \
+        "图形视图" \
         "文件历史"
     [[ $MENU_RESULT -eq 255 ]] && return
 
-    tput cnorm >&2 2>/dev/null || true
-    echo ""
     case $MENU_RESULT in
-        0) git --no-pager log --oneline --color=always -20 ;;
-        1) git --no-pager log --oneline --graph --all --color=always -30 ;;
-        2) git --no-pager log --color=always --format="%C(yellow)%h%C(reset) %C(blue)%ad%C(reset) %C(green)%an%C(reset)%n  %s" --date=short -10 ;;
-        3)
+        0) _git_log_interactive ;;
+        1)
+            echo ""
+            git --no-pager log --oneline --graph --all --color=always -50
+            press_any_key
+            ;;
+        2)
+            echo ""
             local file
             file=$(prompt_input "文件路径" "")
-            if [[ -z "$file" ]]; then
-                press_any_key
-                return
+            if [[ -n "$file" ]]; then
+                git --no-pager log --oneline --color=always -- "$file" 2>/dev/null || msg_error "无记录: $file"
             fi
-            if [[ ! -e "$file" ]] && ! git log --oneline -1 -- "$file" &>/dev/null; then
-                msg_error "文件不存在且无历史记录: $file"
-                press_any_key
-                return
-            fi
-            git --no-pager log --oneline --color=always -- "$file"
+            press_any_key
             ;;
     esac
-    press_any_key
+}
+
+# ── 交互式提交浏览器 ─────────────────────────────────────────
+
+_git_log_interactive() {
+    local page_size=15
+    local batch_size=50
+    local commits=() hashes=()
+    local total=0 selected=0 offset=0
+    local can_load_more=true
+
+    _load_more() {
+        local count=0 line
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            commits+=("$line")
+            hashes+=("${line%% *}")
+            ((total++))
+            ((count++))
+        done < <(git --no-pager log --oneline --skip="$total" -"$batch_size" 2>/dev/null)
+        ((count < batch_size)) && can_load_more=false
+    }
+
+    _load_more
+    if [[ $total -eq 0 ]]; then
+        msg_warn "没有提交记录"
+        press_any_key
+        return
+    fi
+
+    tput civis 2>/dev/null || true
+
+    while true; do
+        # 接近底部时自动加载
+        if $can_load_more && ((selected >= total - 5)); then
+            _load_more
+        fi
+
+        # 调整视口
+        ((selected < offset)) && offset=$selected
+        ((selected >= offset + page_size)) && offset=$((selected - page_size + 1))
+
+        local end=$((offset + page_size))
+        ((end > total)) && end=$total
+
+        clear
+        echo ""
+        printf "  ${C_BOLD}${C_CYAN}┌──────────────────────────────────────────┐${C_RESET}\n"
+        printf "  ${C_BOLD}${C_CYAN}│${C_RESET}  ${C_BOLD}${C_WHITE}🛠  Git 历史%-26s${C_RESET}${C_BOLD}${C_CYAN}│${C_RESET}\n" ""
+        printf "  ${C_BOLD}${C_CYAN}└──────────────────────────────────────────┘${C_RESET}\n"
+        echo ""
+
+        local i
+        for ((i = offset; i < end; i++)); do
+            local hash="${hashes[$i]}"
+            local msg="${commits[$i]#* }"
+            if ((i == selected)); then
+                printf "  ${C_BOLD}${C_GREEN}▶ ${C_YELLOW}%s${C_GREEN} %s${C_RESET}\n" "$hash" "$msg"
+            else
+                printf "    ${C_DIM}%s %s${C_RESET}\n" "$hash" "$msg"
+            fi
+        done
+
+        echo ""
+        local counter="$((selected + 1))/$total"
+        $can_load_more && counter+="+"
+        printf "  ${C_DIM}── %s ─────────────────────────────────────${C_RESET}\n" "$counter"
+        printf "  ${C_DIM}↑↓/jk 选择  Enter 操作  ESC/0 返回${C_RESET}\n"
+
+        local key
+        key=$(read_key)
+
+        case "$key" in
+            up)    ((selected > 0)) && ((selected--)) ;;
+            down)  ((selected < total - 1)) && ((selected++)) ;;
+            enter)
+                tput cnorm 2>/dev/null || true
+                _git_commit_action "${hashes[$selected]}"
+                tput civis 2>/dev/null || true
+                ;;
+            esc|quit|num_0)
+                tput cnorm 2>/dev/null || true
+                return
+                ;;
+        esac
+    done
+}
+
+_git_commit_action() {
+    local hash="$1"
+
+    show_menu "操作 [$hash]" true \
+        "查看详情 (show)" \
+        "重置到此提交 (reset)" \
+        "检出此提交 (checkout)" \
+        "cherry-pick 此提交"
+    [[ $MENU_RESULT -eq 255 ]] && return
+
+    echo ""
+    case $MENU_RESULT in
+        0)
+            git --no-pager show --color=always --stat "$hash"
+            press_any_key
+            ;;
+        1)
+            show_menu "重置模式" true \
+                "soft  (保留暂存区)" \
+                "mixed (保留工作区)" \
+                "hard  (丢弃所有 ⚠️)"
+            [[ $MENU_RESULT -eq 255 ]] && return
+
+            local mode
+            case $MENU_RESULT in
+                0) mode="--soft" ;;
+                1) mode="--mixed" ;;
+                2)
+                    mode="--hard"
+                    echo ""
+                    printf "  ${C_RED}⚠ hard reset 将丢弃所有修改！${C_RESET}\n"
+                    printf "  ${C_YELLOW}输入 yes 确认: ${C_RESET}"
+                    local confirm
+                    read -r confirm
+                    [[ "$confirm" != "yes" ]] && { msg_warn "已取消"; press_any_key; return; }
+                    ;;
+            esac
+
+            if git reset $mode "$hash" 2>&1; then
+                msg_success "已重置到 $hash ($mode)"
+            else
+                msg_error "重置失败"
+            fi
+            press_any_key
+            ;;
+        2)
+            if git checkout "$hash" 2>&1; then
+                msg_success "已检出 $hash (detached HEAD)"
+            else
+                msg_error "检出失败"
+            fi
+            press_any_key
+            ;;
+        3)
+            if git cherry-pick "$hash" 2>&1; then
+                msg_success "已 cherry-pick $hash"
+            else
+                msg_error "cherry-pick 失败（可能有冲突）"
+            fi
+            press_any_key
+            ;;
+    esac
 }
 
 # ── 分支管理 ─────────────────────────────────────────────────
