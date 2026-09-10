@@ -452,19 +452,11 @@ _detect_default_iface() {
     fi
 }
 
-et_iptables_setup() {
-    if is_macos; then
-        msg_warn "iptables 仅适用于 Linux，macOS 请使用 pfctl"
-        press_any_key
-        return
-    fi
+# 收集转发规则参数（IPv4 必填，IPv6 可选）
+# 结果存入全局变量: _FW_VPN4 _FW_LAN4 _FW_IFACE _FW_VPN6 _FW_LAN6
+_FW_VPN4="" _FW_LAN4="" _FW_IFACE="" _FW_VPN6="" _FW_LAN6=""
 
-    if ! command -v iptables &>/dev/null; then
-        msg_error "iptables 未安装"
-        press_any_key
-        return
-    fi
-
+_fw_collect_params() {
     local default_iface
     default_iface=$(_detect_default_iface)
 
@@ -472,40 +464,38 @@ et_iptables_setup() {
     msg_info "配置转发规则（使对端可访问本机局域网）"
     echo ""
 
-    # ── IPv4 ──
-    local vpn4 lan4 iface
-    vpn4=$(prompt_input "VPN IPv4 网段" "10.10.10.0/24")
-    [[ -z "$vpn4" ]] && return
+    _FW_VPN4=$(prompt_input "VPN IPv4 网段" "10.10.10.0/24")
+    [[ -z "$_FW_VPN4" ]] && return 1
 
-    lan4=$(prompt_input "局域网 IPv4 网段" "")
-    [[ -z "$lan4" ]] && return
+    _FW_LAN4=$(prompt_input "局域网 IPv4 网段" "")
+    [[ -z "$_FW_LAN4" ]] && return 1
 
-    iface=$(prompt_input "出口网卡" "$default_iface")
-    [[ -z "$iface" ]] && return
+    _FW_IFACE=$(prompt_input "出口网卡" "$default_iface")
+    [[ -z "$_FW_IFACE" ]] && return 1
 
-    # ── IPv6（可选）──
-    local vpn6="" lan6=""
+    _FW_VPN6="" _FW_LAN6=""
     echo ""
     show_menu "是否配置 IPv6 规则?" true "是" "否"
     if [[ $MENU_RESULT -eq 0 ]]; then
-        vpn6=$(prompt_input "VPN IPv6 网段" "fd00::/8")
-        lan6=$(prompt_input "局域网 IPv6 网段 (如 240e:xx::/64)" "")
+        _FW_VPN6=$(prompt_input "VPN IPv6 网段" "fd00::/8")
+        _FW_LAN6=$(prompt_input "局域网 IPv6 网段 (如 240e:xx::/64)" "")
     fi
+    return 0
+}
 
-    # ── 预览 ──
+# ── Linux: iptables/ip6tables ────────────────────────────────
+
+_fw_apply_iptables() {
     echo ""
     msg_info "IPv4 规则:"
-    printf "  ${C_CYAN}iptables -t nat -A POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$vpn4" "$lan4"
-    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -j ACCEPT${C_RESET}\n" "$vpn4" "$lan4"
-    printf "  ${C_CYAN}iptables -A FORWARD -s %s -d %s -m state --state RELATED,ESTABLISHED -j ACCEPT${C_RESET}\n" "$lan4" "$vpn4"
+    printf "  ${C_CYAN}iptables -t nat POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$_FW_VPN4" "$_FW_LAN4"
+    printf "  ${C_CYAN}iptables FORWARD %s ↔ %s${C_RESET}\n" "$_FW_VPN4" "$_FW_LAN4"
 
-    if [[ -n "$vpn6" && -n "$lan6" ]]; then
+    if [[ -n "$_FW_VPN6" && -n "$_FW_LAN6" ]]; then
         echo ""
         msg_info "IPv6 规则:"
-        printf "  ${C_CYAN}ip6tables -t nat -A POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$vpn6" "$lan6"
-        printf "  ${C_CYAN}ip6tables -A FORWARD -s %s -d %s -j ACCEPT${C_RESET}\n" "$vpn6" "$lan6"
-        printf "  ${C_CYAN}ip6tables -A FORWARD -s %s -d %s -m state --state RELATED,ESTABLISHED -j ACCEPT${C_RESET}\n" "$lan6" "$vpn6"
-        printf "  ${C_CYAN}ip6tables -A FORWARD -p icmpv6 -j ACCEPT${C_RESET}\n"
+        printf "  ${C_CYAN}ip6tables -t nat POSTROUTING -s %s -d %s -j MASQUERADE${C_RESET}\n" "$_FW_VPN6" "$_FW_LAN6"
+        printf "  ${C_CYAN}ip6tables FORWARD %s ↔ %s + ICMPv6${C_RESET}\n" "$_FW_VPN6" "$_FW_LAN6"
     fi
     echo ""
 
@@ -513,103 +503,198 @@ et_iptables_setup() {
     [[ $MENU_RESULT -eq 255 || $MENU_RESULT -eq 2 ]] && return
     local persist=$MENU_RESULT
 
-    # ── 应用 IPv4 ──
-    _run_root iptables -t nat -A POSTROUTING -s "$vpn4" -d "$lan4" -j MASQUERADE
-    _run_root iptables -A FORWARD -s "$vpn4" -d "$lan4" -j ACCEPT
-    _run_root iptables -A FORWARD -s "$lan4" -d "$vpn4" -m state --state RELATED,ESTABLISHED -j ACCEPT
-    msg_success "IPv4 规则已应用"
+    _run_root iptables -t nat -A POSTROUTING -s "$_FW_VPN4" -d "$_FW_LAN4" -j MASQUERADE
+    _run_root iptables -A FORWARD -s "$_FW_VPN4" -d "$_FW_LAN4" -j ACCEPT
+    _run_root iptables -A FORWARD -s "$_FW_LAN4" -d "$_FW_VPN4" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    msg_success "IPv4 iptables 规则已应用"
 
-    # ── 应用 IPv6 ──
-    if [[ -n "$vpn6" && -n "$lan6" ]]; then
-        _run_root ip6tables -t nat -A POSTROUTING -s "$vpn6" -d "$lan6" -j MASQUERADE
-        _run_root ip6tables -A FORWARD -s "$vpn6" -d "$lan6" -j ACCEPT
-        _run_root ip6tables -A FORWARD -s "$lan6" -d "$vpn6" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    if [[ -n "$_FW_VPN6" && -n "$_FW_LAN6" ]]; then
+        _run_root ip6tables -t nat -A POSTROUTING -s "$_FW_VPN6" -d "$_FW_LAN6" -j MASQUERADE
+        _run_root ip6tables -A FORWARD -s "$_FW_VPN6" -d "$_FW_LAN6" -j ACCEPT
+        _run_root ip6tables -A FORWARD -s "$_FW_LAN6" -d "$_FW_VPN6" -m state --state RELATED,ESTABLISHED -j ACCEPT
         _run_root ip6tables -A FORWARD -p icmpv6 -j ACCEPT
         _run_root ip6tables -A INPUT -p icmpv6 -j ACCEPT
-        msg_success "IPv6 规则已应用"
+        msg_success "IPv6 ip6tables 规则已应用"
     fi
 
-    # ── 持久化 ──
     if [[ $persist -eq 1 ]]; then
         if command -v netfilter-persistent &>/dev/null; then
             _run_root netfilter-persistent save 2>/dev/null
-            msg_success "IPv4 + IPv6 规则已持久化"
+            msg_success "规则已持久化 (netfilter-persistent)"
         elif command -v iptables-save &>/dev/null; then
             _run_root sh -c 'iptables-save > /etc/iptables/rules.v4' 2>/dev/null || true
             _run_root sh -c 'ip6tables-save > /etc/iptables/rules.v6' 2>/dev/null || true
-            msg_success "规则已保存"
+            msg_success "规则已保存到 /etc/iptables/"
         else
-            msg_warn "未找到持久化工具，建议安装 iptables-persistent"
+            msg_warn "未找到持久化工具，建议: apt install iptables-persistent"
+        fi
+    fi
+}
+
+# ── macOS: pfctl ─────────────────────────────────────────────
+
+_ET_PF_ANCHOR="/etc/pf.anchors/easytier"
+
+_fw_apply_pfctl() {
+    local rules=""
+
+    # IPv4 NAT + pass
+    rules+="nat on ${_FW_IFACE} from ${_FW_VPN4} to ${_FW_LAN4} -> (${_FW_IFACE})\n"
+    rules+="pass from ${_FW_VPN4} to ${_FW_LAN4}\n"
+    rules+="pass from ${_FW_LAN4} to ${_FW_VPN4}\n"
+
+    # IPv6 NAT + pass
+    if [[ -n "$_FW_VPN6" && -n "$_FW_LAN6" ]]; then
+        rules+="nat on ${_FW_IFACE} inet6 from ${_FW_VPN6} to ${_FW_LAN6} -> (${_FW_IFACE})\n"
+        rules+="pass inet6 from ${_FW_VPN6} to ${_FW_LAN6}\n"
+        rules+="pass inet6 from ${_FW_LAN6} to ${_FW_VPN6}\n"
+        rules+="pass inet6 proto icmp6 all\n"
+    fi
+
+    echo ""
+    msg_info "pfctl 规则预览:"
+    printf "  ${C_DIM}── ${_ET_PF_ANCHOR} ──${C_RESET}\n"
+    printf "$rules" | while IFS= read -r line; do
+        printf "  ${C_CYAN}%s${C_RESET}\n" "$line"
+    done
+    echo ""
+
+    show_menu "确认应用?" true "应用规则" "取消"
+    [[ $MENU_RESULT -ne 0 ]] && return
+
+    # 写入 anchor 文件
+    printf "$rules" | _run_root tee "$_ET_PF_ANCHOR" > /dev/null
+
+    # 在 pf.conf 中注册 anchor（如果尚未添加）
+    if ! grep -q 'anchor "easytier"' /etc/pf.conf 2>/dev/null; then
+        _run_root cp /etc/pf.conf /etc/pf.conf.bak.easytier
+        cat << 'PFEOF' | _run_root tee -a /etc/pf.conf > /dev/null
+
+# EasyTier VPN forwarding
+nat-anchor "easytier"
+rdr-anchor "easytier"
+anchor "easytier"
+load anchor "easytier" from "/etc/pf.anchors/easytier"
+PFEOF
+        msg_info "已添加 anchor 到 /etc/pf.conf (备份: pf.conf.bak.easytier)"
+    fi
+
+    # 启用 pfctl 并加载规则
+    _run_root pfctl -ef /etc/pf.conf 2>/dev/null || true
+    msg_success "pfctl 规则已应用并生效"
+}
+
+# ── 统一入口 ─────────────────────────────────────────────────
+
+et_fw_setup() {
+    if is_macos; then
+        if ! command -v pfctl &>/dev/null; then
+            msg_error "pfctl 不可用"
+            press_any_key
+            return
+        fi
+    else
+        if ! command -v iptables &>/dev/null; then
+            msg_error "iptables 未安装"
+            press_any_key
+            return
+        fi
+    fi
+
+    _fw_collect_params || { press_any_key; return; }
+
+    if is_macos; then
+        _fw_apply_pfctl
+    else
+        _fw_apply_iptables
+    fi
+    press_any_key
+}
+
+et_fw_show() {
+    echo ""
+    if is_macos; then
+        msg_info "pfctl 过滤规则"
+        _run_root pfctl -sr 2>/dev/null || msg_warn "无规则"
+        echo ""
+        msg_info "pfctl NAT 规则"
+        _run_root pfctl -sn 2>/dev/null || msg_warn "无 NAT 规则"
+        if [[ -f "$_ET_PF_ANCHOR" ]]; then
+            echo ""
+            msg_info "EasyTier anchor 内容"
+            cat "$_ET_PF_ANCHOR"
+        fi
+    else
+        msg_info "IPv4 FORWARD"
+        _run_root iptables -L FORWARD -n -v 2>/dev/null || msg_warn "无权限"
+        echo ""
+        msg_info "IPv4 NAT"
+        _run_root iptables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无权限"
+        echo ""
+        msg_info "IPv6 FORWARD"
+        _run_root ip6tables -L FORWARD -n -v 2>/dev/null || msg_warn "无 ip6tables"
+        echo ""
+        msg_info "IPv6 NAT"
+        _run_root ip6tables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无 ip6tables NAT"
+    fi
+    press_any_key
+}
+
+et_fw_clear() {
+    echo ""
+    if is_macos; then
+        printf "  ${C_RED}⚠ 将移除 EasyTier pfctl anchor 规则${C_RESET}\n"
+        printf "  ${C_YELLOW}输入 yes 确认: ${C_RESET}"
+        local confirm
+        read -r confirm
+        [[ "$confirm" != "yes" ]] && { msg_warn "已取消"; press_any_key; return; }
+
+        _run_root rm -f "$_ET_PF_ANCHOR"
+        # 从 pf.conf 移除 EasyTier 相关行
+        _run_root sed -i '' '/EasyTier/d;/easytier/d' /etc/pf.conf 2>/dev/null || true
+        _run_root pfctl -f /etc/pf.conf 2>/dev/null || true
+        msg_success "EasyTier pfctl 规则已清除"
+    else
+        show_menu "清除规则" true "仅 IPv4" "仅 IPv6" "全部 (IPv4 + IPv6)"
+        [[ $MENU_RESULT -eq 255 ]] && return
+
+        printf "\n  ${C_RED}⚠ 将清除选中的 FORWARD 和 NAT 规则！${C_RESET}\n"
+        printf "  ${C_YELLOW}输入 yes 确认: ${C_RESET}"
+        local confirm
+        read -r confirm
+        [[ "$confirm" != "yes" ]] && { msg_warn "已取消"; press_any_key; return; }
+
+        if [[ $MENU_RESULT -eq 0 || $MENU_RESULT -eq 2 ]]; then
+            _run_root iptables -F FORWARD 2>/dev/null || true
+            _run_root iptables -t nat -F POSTROUTING 2>/dev/null || true
+            msg_success "IPv4 规则已清除"
+        fi
+        if [[ $MENU_RESULT -eq 1 || $MENU_RESULT -eq 2 ]]; then
+            _run_root ip6tables -F FORWARD 2>/dev/null || true
+            _run_root ip6tables -t nat -F POSTROUTING 2>/dev/null || true
+            _run_root ip6tables -F INPUT 2>/dev/null || true
+            msg_success "IPv6 规则已清除"
         fi
     fi
     press_any_key
 }
 
-et_iptables_show() {
-    echo ""
-    if is_macos; then
-        msg_info "macOS pfctl 规则"
-        _run_root pfctl -sr 2>/dev/null || msg_warn "无规则或无权限"
-    else
-        msg_info "IPv4 FORWARD 规则"
-        _run_root iptables -L FORWARD -n -v 2>/dev/null || msg_warn "无权限"
-        echo ""
-        msg_info "IPv4 NAT 规则"
-        _run_root iptables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无权限"
-        echo ""
-        msg_info "IPv6 FORWARD 规则"
-        _run_root ip6tables -L FORWARD -n -v 2>/dev/null || msg_warn "无 ip6tables"
-        echo ""
-        msg_info "IPv6 NAT 规则"
-        _run_root ip6tables -t nat -L POSTROUTING -n -v 2>/dev/null || msg_warn "无 ip6tables NAT 支持"
-    fi
-    press_any_key
-}
-
-et_iptables_clear() {
-    if is_macos; then
-        msg_warn "macOS 请手动管理 pfctl 规则"
-        press_any_key
-        return
-    fi
-
-    echo ""
-    show_menu "清除规则" true "仅 IPv4" "仅 IPv6" "全部清除 (IPv4 + IPv6)"
-    [[ $MENU_RESULT -eq 255 ]] && return
-
-    printf "\n  ${C_RED}⚠ 将清除选中的 FORWARD 和 NAT 规则！${C_RESET}\n"
-    printf "  ${C_YELLOW}输入 yes 确认: ${C_RESET}"
-    local confirm
-    read -r confirm
-    [[ "$confirm" != "yes" ]] && { msg_warn "已取消"; press_any_key; return; }
-
-    if [[ $MENU_RESULT -eq 0 || $MENU_RESULT -eq 2 ]]; then
-        _run_root iptables -F FORWARD 2>/dev/null || true
-        _run_root iptables -t nat -F POSTROUTING 2>/dev/null || true
-        msg_success "IPv4 规则已清除"
-    fi
-    if [[ $MENU_RESULT -eq 1 || $MENU_RESULT -eq 2 ]]; then
-        _run_root ip6tables -F FORWARD 2>/dev/null || true
-        _run_root ip6tables -t nat -F POSTROUTING 2>/dev/null || true
-        _run_root ip6tables -F INPUT 2>/dev/null || true
-        msg_success "IPv6 规则已清除"
-    fi
-    press_any_key
-}
-
 menu_et_network() {
+    local fw_tool="iptables"
+    is_macos && fw_tool="pfctl"
+
     while true; do
         show_menu "网络设置" true \
-            "启用 IP 转发" \
-            "配置 iptables 转发规则" \
+            "启用 IP 转发 (IPv4 + IPv6)" \
+            "配置转发规则 ($fw_tool)" \
             "查看防火墙规则" \
             "清除转发规则"
 
         case $MENU_RESULT in
             0) et_enable_ip_forward ;;
-            1) et_iptables_setup ;;
-            2) et_iptables_show ;;
-            3) et_iptables_clear ;;
+            1) et_fw_setup ;;
+            2) et_fw_show ;;
+            3) et_fw_clear ;;
             255) return ;;
         esac
     done
