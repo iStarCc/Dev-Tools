@@ -118,6 +118,7 @@ show_menu() {
                 ;;
             enter)
                 tput cnorm 2>/dev/null || true
+                read -rsn100 -t 0 2>/dev/null || true
                 if [[ $selected -eq $total ]]; then
                     MENU_RESULT=255
                 else
@@ -128,6 +129,7 @@ show_menu() {
             esc)
                 if [[ "$has_back" == "true" ]]; then
                     tput cnorm 2>/dev/null || true
+                    read -rsn100 -t 0 2>/dev/null || true
                     MENU_RESULT=255
                     return
                 fi
@@ -135,12 +137,14 @@ show_menu() {
             quit)
                 if [[ "$has_back" != "true" ]]; then
                     tput cnorm 2>/dev/null || true
+                    read -rsn100 -t 0 2>/dev/null || true
                     MENU_RESULT=255
                     return
                 fi
                 ;;
             num_0)
                 tput cnorm 2>/dev/null || true
+                read -rsn100 -t 0 2>/dev/null || true
                 MENU_RESULT=255
                 return
                 ;;
@@ -148,6 +152,7 @@ show_menu() {
                 local num=${key#num_}
                 if ((num >= 1 && num <= total)); then
                     tput cnorm 2>/dev/null || true
+                    read -rsn100 -t 0 2>/dev/null || true
                     MENU_RESULT=$((num - 1))
                     return
                 fi

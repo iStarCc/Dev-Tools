@@ -141,8 +141,15 @@ et_config_generate() {
 
     local name ip net_name net_secret peer proxy
 
-    name=$(prompt_input "节点名称" "$(hostname)")
+    name=$(prompt_input "节点名称 (仅限 ASCII)" "$(hostname)")
     [[ -z "$name" ]] && return
+    # 清理非 ASCII 字符，bash 3.2 的 read -rsn1 可能截断多字节 UTF-8
+    name=$(printf '%s' "$name" | LC_ALL=C tr -cd '[:print:]' | sed 's/[^a-zA-Z0-9._-]//g')
+    if [[ -z "$name" ]]; then
+        msg_error "节点名称不能为空（非 ASCII 字符已被过滤）"
+        press_any_key
+        return
+    fi
 
     ip=$(prompt_input "虚拟 IP (如 10.10.10.2)" "")
     [[ -z "$ip" ]] && return
@@ -157,7 +164,8 @@ et_config_generate() {
 
     proxy=$(prompt_input "代理网段 (如 192.168.1.0/24，留空跳过)" "")
 
-    local config="instance_name = \"${name}\"
+    local config
+    config="instance_name = \"${name}\"
 ipv4 = \"${ip}\"
 dhcp = false
 listeners = [
@@ -193,16 +201,23 @@ enable_encryption = true
 enable_ipv6 = true
 mtu = 1380"
 
+    # 验证配置是否为有效 UTF-8
+    if ! printf '%s' "$config" | python3 -c "import sys; sys.stdin.buffer.read().decode('utf-8')" 2>/dev/null; then
+        msg_error "配置包含无效字符，请检查输入"
+        press_any_key
+        return
+    fi
+
     echo ""
     msg_info "生成的配置:"
     printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
-    echo "$config"
+    printf '%s\n' "$config"
     printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
     show_menu "安装到 $ET_CONFIG_PATH ?" true "确认安装" "仅显示不安装"
     if [[ $MENU_RESULT -eq 0 ]]; then
         _run_root mkdir -p "$(dirname "$ET_CONFIG_PATH")"
-        echo "$config" | _run_root tee "$ET_CONFIG_PATH" > /dev/null
+        printf '%s\n' "$config" | _run_root tee "$ET_CONFIG_PATH" > /dev/null
         _run_root chmod 644 "$ET_CONFIG_PATH"
         msg_success "配置已写入 $ET_CONFIG_PATH"
     fi
